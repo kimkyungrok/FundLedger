@@ -1,0 +1,737 @@
+<% layout('layout') %>
+
+<%
+  const fmt = (n)=>'₩' + (Number(n||0)).toLocaleString();
+  const iso = (d)=> { try { return new Date(d).toISOString().slice(0,10); } catch { return ''; } };
+
+  const sum = Object.assign({ income:0, expense:0, balance:0 }, summary||{});
+  const detail = Object.assign({
+    prevYear: (new Date().getFullYear()-1),
+    year: new Date().getFullYear(),
+    prevCarry: 0,
+    yearIncome: 0, yearExpense: 0, yearBalance: 0
+  }, (summary && summary.detail) ? summary.detail : {});
+%>
+
+<style>
+  :root{ --radius:12px; --padY:.55rem; --padX:.75rem; --stickyZ:6; --bgHead:#f8fafc; --bd:#e5e7eb; --bd-strong:#d1d5db }
+
+  .ledger-wrap{border-radius:var(--radius);box-shadow:0 2px 12px rgba(0,0,0,.06);overflow:hidden;background:#fff}
+  .summary-card .title{font-size:.92rem;color:#64748b}
+  .summary-card .val{font-size:1.1rem}
+  .scroll-shadow{max-height:60vh; overflow:auto; box-shadow: inset 12px 0 12px -12px rgba(0,0,0,.15), inset -12px 0 12px -12px rgba(0,0,0,.15); -webkit-overflow-scrolling:touch}
+
+  .table-tight{ margin-bottom:0; border:1px solid var(--bd)!important; border-collapse:collapse!important }
+  .table-tight thead th, .table-tight tbody td{ border:1px solid var(--bd)!important }
+
+  .table-summary{ width:100% }
+  .table-summary thead th{ background:#f9fafb; font-weight:700 }
+  .table-summary thead th, .table-summary tbody td{ padding:.55rem .6rem!important }
+
+  .table-ledger{ table-layout:auto }
+  .table-ledger thead th{
+    position:sticky; top:0; z-index:var(--stickyZ);
+    background:var(--bgHead)!important; font-weight:700; letter-spacing:-.2px; font-size:.9rem;
+    border-bottom:1px solid var(--bd-strong)!important
+  }
+  .table-ledger thead th, .table-ledger tbody td{ white-space:nowrap; vertical-align:middle; padding:var(--padY) var(--padX)!important }
+  .table-ledger tbody tr:hover{background:#f6faff}
+  .table-ledger tbody tr:nth-child(even){background:#fcfcfd}
+  .table-ledger td:nth-child(1), .table-ledger th:nth-child(1){
+    position:sticky; left:0; z-index:var(--stickyZ); background:inherit; border-right:1px solid var(--bd)!important
+  }
+  .table-ledger td:last-child, .table-ledger th:last-child{
+    position:sticky; right:0; z-index:var(--stickyZ); background:inherit; border-left:1px solid var(--bd)!important
+  }
+
+  .col-date{min-width:118px; text-align:center}
+  .col-desc{min-width:280px; max-width:520px}
+  .col-money{min-width:128px}
+  .col-action{width:200px; text-align:center}
+
+  .num{text-align:right;font-variant-numeric:tabular-nums}
+  .num.income{color:#1266f1;font-weight:600}
+  .num.expense{color:#e03131;font-weight:600}
+  .num.balance.pos{color:#0a7d42;font-weight:700}
+  .num.balance.neg{color:#c92a2a;font-weight:700}
+  .empty-row{color:#94a3b8}
+  .inline-pill{display:inline-block; min-width:78px; padding:.35rem .6rem; background:#f1f5f9; border:1px solid #e2e8f0; border-radius:.5rem; font-weight:700; color:#0f172a}
+  .inline-money{ background:#eef2ff; border-color:#e0e7ff; color:#111827 }
+  .cell-edit{padding:0!important}
+  .cell-input, .pill-input{ width:100%; height:34px; border:1.5px solid #cbd5e1; border-radius:8px; padding:0 .55rem; font-size:.92rem; outline:none }
+  .pill-input{ width:auto; min-width:100px }
+  .pill-input.num{ text-align:right } .pill-input.text{ text-align:left }
+  .cell-input:focus, .pill-input:focus{ border-color:#7c3aed; box-shadow:0 0 0 .2rem rgba(124,58,237,.12) }
+  .btn-icon{ --bs-btn-padding-y:.25rem; --bs-btn-padding-x:.45rem; --bs-btn-font-size:.85rem }
+  .form-label{font-size:.92rem; color:#334155; margin-bottom:.25rem}
+
+  tr.add-row td{ background:#fffdf3!important; border-top:2px solid var(--bd-strong)!important; border-bottom:2px solid var(--bd-strong)!important }
+  .cell-input{height:36px; line-height:34px}
+  .cell-input[type="date"]{padding-right:2rem}
+  .cell-actions{ display:flex; align-items:center; justify-content:center; gap:.5rem; white-space:nowrap }
+  .cell-actions .btn{min-width:64px}
+  .cell-actions .btn i{vertical-align:-.1em}
+  .table-ledger thead th, .table-ledger tbody td{ vertical-align:middle; padding:.5rem .6rem!important }
+
+  /* OCR 모달 */
+  #ocrModal .modal-body { position: relative }
+  #ocrPreview{ position:relative; min-height:320px; display:flex; align-items:center; justify-content:center; background:#f8fafc }
+  #ocrPreview img{ max-width:100%; max-height:380px; object-fit:contain; border-radius:8px }
+
+  #ocrProgressWrap{
+    position:absolute; inset:0; display:flex; align-items:center; justify-content:center;
+    background:rgba(255,255,255,.78); backdrop-filter:blur(2px);
+    z-index:1065; visibility:hidden; opacity:0; transition:.15s
+  }
+  #ocrProgressWrap.show{ visibility:visible; opacity:1 }
+  .progress-circle{
+    width:96px; height:96px; border-radius:50%;
+    background: conic-gradient(#4f46e5 var(--p,0%), #e5e7eb 0);
+    display:grid; place-items:center; font-weight:700; color:#111827;
+    box-shadow:0 2px 8px rgba(0,0,0,.08); border:3px solid #eef2ff
+  }
+  .progress-circle span{ font-size:.9rem }
+
+  .candidate-box{ background:#f9fafb; border:1px solid #e5e7eb; border-radius:10px; padding:.75rem }
+  .candidate-box h6{ font-weight:700; font-size:.95rem; margin-bottom:.5rem }
+  .candidate-list{ max-height:160px; overflow:auto }
+  .candidate-item{ display:flex; align-items:center; gap:.5rem; padding:.25rem .35rem; border-radius:8px }
+  .candidate-item:hover{ background:#eef2ff; cursor:pointer }
+
+  @media (max-width: 576px){
+    :root{ --padY:.45rem; --padX:.5rem }
+    .summary-card .val{font-size:1rem}
+    .table-ledger thead th, .table-ledger tbody td{ padding:.4rem .5rem!important; font-size:.9rem }
+    .table-ledger td:nth-child(1), .table-ledger th:nth-child(1),
+    .table-ledger td:last-child, .table-ledger th:last-child{ position:static }
+    .col-date{min-width:100px}
+    .col-desc{min-width:180px; max-width:none; white-space:normal; word-break:break-word}
+    .col-money{min-width:110px}
+    .scroll-shadow{max-height:none}
+    .cell-actions{gap:.35rem}
+    .cell-actions .btn{min-width:auto; padding:.3rem .5rem}
+  }
+</style>
+
+<!-- 검색(정렬 제거) -->
+<form class="card shadow-sm p-3 mb-4 bg-light" method="get" action="/entries">
+  <div class="card-body">
+    <h6 class="fw-bold mb-3"><i class="bi bi-search me-2"></i>검색 조건</h6>
+    <div class="row g-3 align-items-end">
+      <div class="col-md-3">
+        <label for="start" class="form-label fw-semibold">시작일</label>
+        <input type="date" id="start" name="start" class="form-control form-control-sm" value="<%= start %>">
+      </div>
+      <div class="col-md-3">
+        <label for="end" class="form-label fw-semibold">종료일</label>
+        <input type="date" id="end" name="end" class="form-control form-control-sm" value="<%= end %>">
+      </div>
+      <div class="col-md-4">
+        <label for="q" class="form-label fw-semibold">적요 검색</label>
+        <input type="text" id="q" name="q" class="form-control form-control-sm" placeholder="검색어 입력" value="<%= q %>">
+      </div>
+      <div class="col-md-2 d-flex gap-2">
+        <button class="btn btn-sm btn-primary w-50" type="submit"><i class="bi bi-search"></i> 검색</button>
+        <a class="btn btn-sm btn-outline-secondary w-50" href="/entries"><i class="bi bi-arrow-counterclockwise"></i> 초기화</a>
+      </div>
+    </div>
+  </div>
+</form>
+
+<!-- 요약 -->
+<div class="card shadow-sm border-0 mb-4 summary-card">
+  <div class="card-body">
+    <div class="row text-center border-bottom pb-2 mb-3">
+      <div class="col-md-4"><div class="title fw-bold">총 수입</div><div class="val text-primary fw-bold" id="sumIncome"><%= fmt(sum.income) %></div></div>
+      <div class="col-md-4"><div class="title fw-bold">총 지출</div><div class="val text-danger fw-bold" id="sumExpense"><%= fmt(sum.expense) %></div></div>
+      <div class="col-md-4"><div class="title fw-bold">총 잔액</div><div class="val text-success fw-bold" id="sumBalance"><%= fmt(sum.balance) %></div></div>
+    </div>
+
+    <div class="table-responsive mt-3">
+      <table class="table table-sm table-bordered table-tight table-summary align-middle mb-0">
+        <tbody class="align-middle">
+          <tr>
+            <td class="text-end text-secondary fw-semibold" style="width:45%">
+              <div class="d-inline-flex align-items-center gap-2">
+                <span class="small text-muted">기준연도</span>
+                <span id="prevYearView" class="inline-pill" title="더블클릭하여 수정"><%= detail.prevYear %></span>
+                <span class="fw-semibold">년 이월금</span>
+              </div>
+            </td>
+            <td class="text-end">
+              <span id="prevCarryView" class="inline-pill inline-money" title="더블클릭하여 수정"><%= fmt(detail.prevCarry) %></span>
+            </td>
+          </tr>
+          <tr>
+            <td class="text-end text-secondary"><span id="labelIncomeYear" class="fw-semibold"><%= detail.year %></span>년 수입</td>
+            <td class="text-end text-primary fw-bold" id="valYearIncome"><%= fmt(detail.yearIncome) %></td>
+          </tr>
+          <tr>
+            <td class="text-end text-secondary"><span id="labelExpenseYear" class="fw-semibold"><%= detail.year %></span>년 지출</td>
+            <td class="text-end text-danger fw-bold" id="valYearExpense"><%= fmt(detail.yearExpense) %></td>
+          </tr>
+          <tr>
+            <td class="text-end fw-bold"><span id="labelBalanceYear" class="text-dark"><%= detail.year %></span>년 총 잔액</td>
+            <td class="text-end text-success fw-bold fs-6" id="valYearBalance"><%= fmt(detail.yearBalance) %></td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+</div>
+
+<!-- 리스트 + 정렬 + 입력 -->
+<div class="d-flex flex-wrap justify-content-between align-items-center mb-2 gap-2">
+  <h5 class="mb-0 d-flex align-items-center gap-2">
+    입출금 내역
+    <div class="d-flex align-items-center gap-2">
+      <label for="orderInline" class="form-label mb-0 small text-muted">정렬</label>
+      <select id="orderInline" class="form-select form-select-sm" style="min-width: 150px;">
+        <option value="asc">최초 날짜순</option>
+        <option value="desc">최신 날짜순</option>
+      </select>
+    </div>
+  </h5>
+  <div class="d-flex gap-2">
+    <button id="addRowBtn" type="button" class="btn btn-sm btn-success">
+      <i class="bi bi-plus-square"></i> 입력
+    </button>
+    <button id="openOcrModalBtn" type="button" class="btn btn-sm btn-outline-primary">
+      <i class="bi bi-receipt"></i> 영수증 인식
+    </button>
+  </div>
+</div>
+
+<div class="ledger-wrap">
+  <div class="table-responsive scroll-shadow">
+    <table id="ledgerTable" class="table table-sm table-bordered table-tight table-ledger align-middle">
+      <thead>
+        <tr>
+          <th class="col-date">일자</th>
+          <th class="col-desc">적요</th>
+          <th class="col-money text-end">수입</th>
+          <th class="col-money text-end">지출</th>
+          <th class="col-money text-end">잔액</th>
+          <th class="col-action">Action</th>
+        </tr>
+      </thead>
+      <tbody id="ledgerBody">
+        <% if (!rows || rows.length === 0) { %>
+          <tr class="empty-row"><td colspan="6" class="text-center py-3">데이터가 없습니다.</td></tr>
+        <% } else { %>
+          <% let running = Number(detail.prevCarry||0); %>
+          <% for (const r of rows) { running += (Number(r.income||0) - Number(r.expense||0)); %>
+            <tr data-id="<%= r._id %>">
+              <td class="col-date"><%= iso(r.date) %></td>
+              <td class="col-desc text-truncate" title="<%= r.desc %>"><%= r.desc %></td>
+              <td class="col-money num income"><%= (r.income||0)?(r.income).toLocaleString():'' %></td>
+              <td class="col-money num expense"><%= (r.expense||0)?(r.expense).toLocaleString():'' %></td>
+              <td class="col-money num balance <%= running>=0?'pos':'neg' %>"><%= running.toLocaleString() %></td>
+              <td class="col-action">
+                <button type="button" class="btn btn-outline-danger btn-icon btn-sm btn-del" title="삭제">
+                  <i class="bi bi-trash"></i>삭제
+                </button>
+              </td>
+            </tr>
+          <% } %>
+        <% } %>
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<!-- OCR 모달 -->
+<div class="modal fade" id="ocrModal" tabindex="-1" aria-hidden="true">
+  <div class="modal-dialog modal-dialog-centered modal-xl">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h5 class="modal-title"><i class="bi bi-receipt me-2"></i>영수증 인식</h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="닫기"></button>
+      </div>
+      <div class="modal-body">
+        <div class="d-flex gap-2 mb-3">
+          <input id="fileCamera" type="file" accept="image/*" capture="environment" class="d-none">
+          <input id="fileGallery" type="file" accept="image/*" class="d-none">
+          <button id="btnCamera" class="btn btn-sm btn-primary" type="button"><i class="bi bi-camera-fill me-1"></i>카메라로 촬영</button>
+          <button id="btnGallery" class="btn btn-sm btn-outline-secondary" type="button"><i class="bi bi-image me-1"></i>사진 불러오기</button>
+        </div>
+
+        <div class="row g-3">
+          <div class="col-12 col-lg-6">
+            <div id="ocrPreview" class="border rounded p-2 text-center bg-light">
+              <img id="ocrPreviewImg" alt="receipt" style="max-width:100%; max-height:380px; object-fit:contain; border-radius:8px; display:none;">
+              <div id="ocrProgressWrap">
+                <div class="progress-circle" id="ocrCircle" style="--p:0%"><span id="ocrPct">0%</span></div>
+              </div>
+            </div>
+
+            <div class="row g-2 mt-3">
+              <div class="col-12 col-md-4">
+                <label class="form-label fw-semibold">선택 일자</label>
+                <input id="ocrDateInput" type="date" class="form-control form-control-sm">
+              </div>
+              <div class="col-12 col-md-4">
+                <label class="form-label fw-semibold">선택 총금액(지출)</label>
+                <input id="ocrTotalInput" type="number" class="form-control form-control-sm text-end" min="0" step="1" placeholder="예: 15800">
+              </div>
+              <div class="col-12 col-md-4">
+                <label class="form-label fw-semibold">선택 적요</label>
+                <input id="ocrDescInput" type="text" class="form-control form-control-sm" placeholder="예: 영수증 지출" value="">
+              </div>
+            </div>
+
+            <p id="ocrStatus" class="small text-muted mt-2">준비됨.</p>
+          </div>
+
+          <div class="col-12 col-lg-6">
+            <div class="candidate-box mb-3">
+              <h6><i class="bi bi-calendar-check me-1"></i>일자 후보</h6>
+              <div id="dateCandidates" class="candidate-list"></div>
+            </div>
+            <div class="candidate-box mb-3">
+              <h6><i class="bi bi-cash-coin me-1"></i>금액 후보</h6>
+              <div id="amountCandidates" class="candidate-list"></div>
+            </div>
+            <div class="candidate-box">
+              <h6><i class="bi bi-shop me-1"></i>상호/매장 후보</h6>
+              <div id="vendorCandidates" class="candidate-list"></div>
+            </div>
+            <details class="mt-2">
+              <summary class="small text-muted">원문 보기</summary>
+              <textarea id="ocrRawText" class="form-control form-control-sm mt-2" rows="6" readonly></textarea>
+            </details>
+          </div>
+        </div>
+      </div>
+
+      <div class="modal-footer">
+        <button class="btn btn-sm btn-secondary" data-bs-dismiss="modal" type="button">닫기</button>
+        <button id="btnOcrApply" class="btn btn-sm btn-primary" type="button"><i class="bi bi-check2"></i> 확인 후 적용</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Tesseract.js -->
+<script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
+
+<script>
+document.addEventListener('DOMContentLoaded', () => {
+  const ledgerBody   = document.getElementById('ledgerBody');
+  const addRowBtn    = document.getElementById('addRowBtn');
+
+  const sumIncomeEl  = document.getElementById('sumIncome');
+  const sumExpenseEl = document.getElementById('sumExpense');
+  const sumBalanceEl = document.getElementById('sumBalance');
+  const valIncomeEl  = document.getElementById('valYearIncome');
+  const valExpenseEl = document.getElementById('valYearExpense');
+  const valBalanceEl = document.getElementById('valYearBalance');
+
+  const prevYearView = document.getElementById('prevYearView');
+  const prevCarryView= document.getElementById('prevCarryView');
+  const labelIncomeY = document.getElementById('labelIncomeYear');
+  const labelExpenseY= document.getElementById('labelExpenseYear');
+  const labelBalanceY= document.getElementById('labelBalanceYear');
+
+  const orderInline  = document.getElementById('orderInline');
+
+  /* ===== 공용 ===== */
+  function toCurrency(n){ return '₩' + (Number(n||0)).toLocaleString(); }
+  function unformat(s){ return Number((s||'').toString().replace(/[₩,]/g,'').trim())||0; }
+  const today = () => new Date().toISOString().slice(0,10);
+  function getCarry(){ return unformat(prevCarryView.textContent); }
+
+  function parseYmd(s){
+    const m = String(s||'').match(/^(\d{4})-(\d{2})-(\d{2})$/);
+    if(!m) return null;
+    const d = new Date(Number(m[1]), Number(m[2])-1, Number(m[3]));
+    return isNaN(d)? null : d;
+  }
+
+  function recomputeRunningBalance(){
+    let running = getCarry();
+    const rows = Array.from(ledgerBody.querySelectorAll('tr')).filter(tr=>!tr.classList.contains('empty-row'));
+    rows.forEach(tr=>{
+      const income = Number((tr.children[2]?.textContent || '0').replace(/,/g,''))||0;
+      const expense = Number((tr.children[3]?.textContent || '0').replace(/,/g,''))||0;
+      running += (income - expense);
+      const td = tr.children[4];
+      td.textContent = running ? running.toLocaleString() : '';
+      td.classList.remove('pos','neg');
+      td.classList.add('num','balance', running>=0 ? 'pos' : 'neg');
+    });
+  }
+  function updateTotals(){
+    const incomes = Array.from(ledgerBody.querySelectorAll('td:nth-child(3)'))
+      .reduce((t,td)=> t + Number((td.textContent||'0').replace(/,/g,'')), 0);
+    const expenses = Array.from(ledgerBody.querySelectorAll('td:nth-child(4)'))
+      .reduce((t,td)=> t + Number((td.textContent||'0').replace(/,/g,'')), 0);
+    const balance = getCarry() + incomes - expenses;
+
+    sumIncomeEl.textContent  = toCurrency(incomes);
+    sumExpenseEl.textContent = toCurrency(expenses);
+    sumBalanceEl.textContent = toCurrency(balance);
+    valIncomeEl.textContent  = toCurrency(incomes);
+    valExpenseEl.textContent = toCurrency(expenses);
+    valBalanceEl.textContent = toCurrency(balance);
+  }
+  function renderYearLabels(){
+    const base = Number(prevYearView.textContent)||new Date().getFullYear()-1;
+    const y = base + 1;
+    labelIncomeY.textContent  = y;
+    labelExpenseY.textContent = y;
+    labelBalanceY.textContent = y;
+  }
+  async function saveCarrySetting(partial){
+    try{ await fetch('/settings/carry', { method:'PUT', headers:{'Content-Type':'application/json'}, body: JSON.stringify(partial) }); }catch(e){}
+  }
+
+  function editPillYear(el){
+    const original = el.textContent.trim();
+    const input = document.createElement('input');
+    input.type = 'number'; input.min = 1900; input.max = 2100;
+    input.className = 'pill-input text';
+    input.value = original;
+    el.replaceWith(input);
+    input.focus(); input.select();
+
+    const cancel = () => { input.replaceWith(el); el.textContent = original; };
+    const commit = () => {
+      const v = Number(input.value)||Number(original);
+      el.textContent = v;
+      input.replaceWith(el);
+      renderYearLabels();
+      saveCarrySetting({ prevYear: v, prevCarry: unformat(prevCarryView.textContent) });
+    };
+    input.addEventListener('keydown', (e)=>{ if(e.key==='Enter'){e.preventDefault();commit();} else if(e.key==='Escape'){e.preventDefault();cancel();} });
+    input.addEventListener('blur', commit);
+  }
+  prevYearView.addEventListener('dblclick', ()=> editPillYear(prevYearView));
+
+  function editPillMoney(el){
+    const original = el.textContent.trim();
+    const input = document.createElement('input');
+    input.type = 'text'; input.inputMode = 'numeric';
+    input.className = 'pill-input num';
+    input.value = unformat(original);
+    el.replaceWith(input);
+    input.focus(); input.select();
+
+    const cancel = () => { input.replaceWith(el); el.textContent = original; };
+    const commit = () => {
+      const v = Number((input.value||'').toString().replace(/,/g,''))||0;
+      el.textContent = toCurrency(v);
+      input.replaceWith(el);
+      recomputeRunningBalance(); updateTotals();
+      saveCarrySetting({ prevYear: Number(prevYearView.textContent)||new Date().getFullYear()-1, prevCarry: v });
+    };
+    input.addEventListener('keydown', (e)=>{ if(e.key==='Enter'){e.preventDefault();commit();} else if(e.key==='Escape'){e.preventDefault();cancel();} });
+    input.addEventListener('blur', commit);
+  }
+  prevCarryView.addEventListener('dblclick', ()=> editPillMoney(prevCarryView));
+
+  /* ===== 정렬 ===== */
+  function sortRows(order='asc'){
+    const trs = Array.from(ledgerBody.querySelectorAll('tr'))
+      .filter(tr => !tr.classList.contains('add-row') && !tr.classList.contains('empty-row'));
+
+    trs.sort((a,b)=>{
+      const da = parseYmd(a.children[0]?.textContent) || new Date(0);
+      const db = parseYmd(b.children[0]?.textContent) || new Date(0);
+      return order==='desc' ? (db - da) : (da - db);
+    });
+
+    trs.forEach(tr => ledgerBody.appendChild(tr));
+    recomputeRunningBalance();
+  }
+
+  function getCurrentOrder(){
+    return (orderInline?.value === 'desc') ? 'desc' : 'asc';
+  }
+
+  // 초기 정렬값(로컬 저장된 값 우선, 없으면 서버 기본값 추정 asc)
+  const savedOrder = localStorage.getItem('ledger.order');
+  orderInline.value = savedOrder === 'desc' ? 'desc' : 'asc';
+  sortRows(getCurrentOrder());
+  updateTotals();
+
+  // 셀렉터 변경 시 즉시 정렬 및 저장
+  orderInline.addEventListener('change', ()=>{
+    localStorage.setItem('ledger.order', getCurrentOrder());
+    sortRows(getCurrentOrder());
+    updateTotals();
+  });
+
+  /* ===== 행 인라인 편집/삭제/추가 ===== */
+  let editing=null;
+  function cancelCell(){ if(!editing) return; const {td, html}=editing; td.classList.remove('cell-edit'); td.innerHTML=html; editing=null; }
+  async function commitCell(){
+    if(!editing) return;
+    const {td, input} = editing;
+    const tr = td.closest('tr'); const id = tr?.dataset?.id;
+    const col = td.cellIndex;
+    let val = input.value.trim();
+
+    if(col===0){ td.textContent = val || ''; }
+    else if(col===1){ td.textContent = val; }
+    else if(col===2 || col===3){
+      const n = Number(val.replace(/,/g,''))||0;
+      td.classList.add('num', col===2?'income':'expense');
+      td.textContent = n ? n.toLocaleString() : '';
+      val = String(n);
+    }
+    td.classList.remove('cell-edit'); editing=null;
+
+    // 날짜 변경/금액 변경 후 현재 정렬 유지
+    sortRows(getCurrentOrder());
+    updateTotals();
+
+    if(id){
+      const payload = {};
+      if(col===0) payload.date = td.textContent;
+      if(col===1) payload.desc = td.textContent;
+      if(col===2) payload.income = Number(val)||0;
+      if(col===3) payload.expense= Number(val)||0;
+      try{ await fetch(`/entries/${id}`, { method:'PUT', headers:{'Content-Type':'application/json'}, body: JSON.stringify(payload) }); }catch(e){ alert('수정 저장 실패'); }
+    }
+  }
+  function makeEditable(td){
+    if(editing && editing.td===td) return;
+    if(editing) cancelCell();
+    const col = td.cellIndex; if(col===4 || col===5) return;
+    if(td.parentElement.classList.contains('empty-row')) return;
+    if(td.closest('tr')?.classList.contains('add-row')) return;
+
+    const cur = td.textContent.trim();
+    const html = td.innerHTML;
+    td.classList.add('cell-edit');
+
+    let input;
+    if(col===0){ input = document.createElement('input'); input.type='date'; input.className='cell-input text'; input.value = cur || today(); }
+    else if(col===1){ input = document.createElement('input'); input.type='text'; input.className='cell-input text'; input.value = cur; input.maxLength=200; }
+    else{ input = document.createElement('input'); input.type='text'; input.inputMode='numeric'; input.className='cell-input num'; input.value = cur.replace(/,/g,''); }
+    td.innerHTML=''; td.appendChild(input); input.focus(); if(col!==0) input.select();
+    input.addEventListener('keydown',(e)=>{ if(e.key==='Enter'){e.preventDefault();commitCell();} else if(e.key==='Escape'){e.preventDefault();cancelCell();} });
+    input.addEventListener('blur', commitCell);
+    editing = {td, input, html};
+  }
+  ledgerBody.addEventListener('dblclick', (e)=>{ const td = e.target.closest('td'); if(td) makeEditable(td); });
+
+  async function deleteRow(tr){
+    const id = tr?.dataset?.id;
+    if(!id) { tr.remove(); afterRowChange(); return; }
+    try{
+      const res = await fetch(`/entries/${id}`, { method:'DELETE' });
+      const js = await res.json();
+      if(!js.ok) throw new Error(js.error||'delete failed');
+      tr.remove(); afterRowChange();
+    }catch(e){ alert('삭제 실패'); }
+  }
+  function afterRowChange(){
+    if(!ledgerBody.querySelector('tr:not(.add-row)')){
+      const row=document.createElement('tr'); row.className='empty-row';
+      row.innerHTML=`<td colspan="6" class="text-center py-3">데이터가 없습니다.</td>`;
+      ledgerBody.appendChild(row);
+    }
+    sortRows(getCurrentOrder());
+    updateTotals();
+  }
+  ledgerBody.addEventListener('click', (e)=>{
+    const btn = e.target.closest('.btn-del'); if(!btn) return;
+    const tr = btn.closest('tr'); if(!tr) return;
+    if(confirm('정말 삭제할까요?')) deleteRow(tr);
+  });
+
+  function ensureAddRow(){
+    let row = ledgerBody.querySelector('tr.add-row');
+    if (row) return row;
+
+    const empty = ledgerBody.querySelector('.empty-row'); if (empty) empty.remove();
+
+    const tr = document.createElement('tr');
+    tr.className = 'add-row';
+    tr.innerHTML = `
+      <td class="col-date cell-edit"><input type="date" class="cell-input text" id="addDate" value="${today()}"></td>
+      <td class="col-desc cell-edit"><input type="text" class="cell-input text" id="addDesc" maxlength="200" placeholder="적요 입력"></td>
+      <td class="col-money cell-edit"><input type="text" class="cell-input num" id="addIncome" inputmode="numeric" value="0"></td>
+      <td class="col-money cell-edit"><input type="text" class="cell-input num" id="addExpense" inputmode="numeric" value="0"></td>
+      <td class="col-money num balance"></td>
+      <td class="col-action">
+        <div class="cell-actions">
+          <button type="button" class="btn btn-sm btn-outline-primary btn-ocr"><i class="bi bi-receipt"></i> 영수증</button>
+          <button type="button" class="btn btn-sm btn-primary btn-commit"><i class="bi bi-check2"></i> 완료</button>
+          <button type="button" class="btn btn-sm btn-outline-secondary btn-cancel"><i class="bi bi-x"></i> 취소</button>
+        </div>
+      </td>`;
+    ledgerBody.prepend(tr);
+    tr.querySelector('#addDesc').focus();
+    return tr;
+  }
+  async function commitAddRow(btn){
+    const tr = btn.closest('tr.add-row'); if(!tr) return;
+    const date = tr.querySelector('#addDate')?.value || '';
+    const desc = (tr.querySelector('#addDesc')?.value || '').trim();
+    const income = Number((tr.querySelector('#addIncome')?.value||'').toString().replace(/,/g,''))||0;
+    const expense= Number((tr.querySelector('#addExpense')?.value||'').toString().replace(/,/g,''))||0;
+
+    if(!date || !desc){ alert('일자와 적요는 필수입니다.'); return; }
+
+    let insertedId=null;
+    try{
+      const r = await fetch('/entries', {
+        method:'POST', headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({ date, desc, income, expense })
+      }).then(r=>r.json());
+      if(!r.ok) throw new Error(r.error||'insert failed');
+      insertedId = r.id;
+    }catch(e){ alert('저장 실패'); return; }
+
+    tr.classList.remove('add-row');
+    tr.setAttribute('data-id', insertedId);
+    tr.innerHTML = `
+      <td class="col-date">${date}</td>
+      <td class="col-desc text-truncate" title="${desc}">${desc}</td>
+      <td class="col-money num income">${income?income.toLocaleString():''}</td>
+      <td class="col-money num expense">${expense?expense.toLocaleString():''}</td>
+      <td class="col-money num balance"></td>
+      <td class="col-action">
+        <button type="button" class="btn btn-outline-danger btn-icon btn-sm btn-del" title="삭제">
+          <i class="bi bi-trash"></i>
+        </button>
+      </td>`;
+    // 저장 후 현재 정렬 기준 적용
+    sortRows(getCurrentOrder());
+    updateTotals();
+  }
+  function cancelAddRow(btn){ const tr = btn.closest('tr.add-row'); if(!tr) return; tr.remove(); afterRowChange(); }
+
+  document.getElementById('addRowBtn').addEventListener('click', ensureAddRow);
+  ledgerBody.addEventListener('click', (e)=>{
+    if(e.target.closest('.btn-commit')) commitAddRow(e.target.closest('.btn-commit'));
+    if(e.target.closest('.btn-cancel')) cancelAddRow(e.target.closest('.btn-cancel'));
+  });
+
+  /* ===== OCR 진행/파이프라인·초기화/적용 ===== */
+  const ocrModalEl   = document.getElementById('ocrModal');
+  const openOcrModalBtn = document.getElementById('openOcrModalBtn');
+  const btnCamera    = document.getElementById('btnCamera');
+  const btnGallery   = document.getElementById('btnGallery');
+  const fileCamera   = document.getElementById('fileCamera');
+  const fileGallery  = document.getElementById('fileGallery');
+  const ocrImg       = document.getElementById('ocrPreviewImg');
+  const ocrDateInput = document.getElementById('ocrDateInput');
+  const ocrTotalInput= document.getElementById('ocrTotalInput');
+  const ocrDescInput = document.getElementById('ocrDescInput');
+  const ocrStatus    = document.getElementById('ocrStatus');
+  const btnOcrApply  = document.getElementById('btnOcrApply');
+
+  const ocrProgressWrap = document.getElementById('ocrProgressWrap');
+  const ocrCircle = document.getElementById('ocrCircle');
+  const ocrPct = document.getElementById('ocrPct');
+
+  const dateCandidatesEl = document.getElementById('dateCandidates');
+  const amountCandidatesEl = document.getElementById('amountCandidates');
+  const vendorCandidatesEl = document.getElementById('vendorCandidates');
+  const ocrRawTextEl = document.getElementById('ocrRawText');
+
+  function setOcrProgress(pct){
+    const p = Math.max(0, Math.min(100, Math.round(pct)));
+    if (ocrCircle) ocrCircle.style.setProperty('--p', p + '%');
+    if (ocrPct)    ocrPct.textContent = p + '%';
+  }
+  const nextPaint = () => new Promise(r => requestAnimationFrame(()=>requestAnimationFrame(r)));
+  async function showOcrProgress(){ setOcrProgress(5); ocrProgressWrap.classList.add('show'); await nextPaint(); await nextPaint(); }
+  function hideOcrProgress(){ setOcrProgress(100); setTimeout(()=> ocrProgressWrap.classList.remove('show'), 120); }
+
+  let lastTargetRow = null;
+  let ocrBusy = false;
+
+  function setBusy(flag){
+    ocrBusy = !!flag;
+    [btnCamera, btnGallery, fileCamera, fileGallery, btnOcrApply, ocrDateInput, ocrTotalInput, ocrDescInput].forEach(el=>{ if(el) el.disabled = ocrBusy; });
+    if (ocrModalEl) {
+      if (ocrBusy) { ocrModalEl.setAttribute('data-bs-backdrop','static'); ocrModalEl.setAttribute('data-bs-keyboard','false'); }
+      else { ocrModalEl.removeAttribute('data-bs-backdrop'); ocrModalEl.removeAttribute('data-bs-keyboard'); }
+    }
+  }
+  if (ocrModalEl) ocrModalEl.addEventListener('hide.bs.modal', (e)=>{ if (ocrBusy) e.preventDefault(); });
+
+  function resetOcrModal(){
+    if (ocrImg) { ocrImg.src=''; ocrImg.style.display='none'; }
+    if (ocrRawTextEl) ocrRawTextEl.value='';
+    if (ocrDateInput) ocrDateInput.value='';
+    if (ocrTotalInput) ocrTotalInput.value='';
+    if (ocrDescInput) ocrDescInput.value='';
+    dateCandidatesEl.innerHTML = '';
+    amountCandidatesEl.innerHTML = '';
+    vendorCandidatesEl.innerHTML = '';
+    ocrStatus.textContent = '준비됨.';
+    setOcrProgress(0);
+  }
+
+  if (openOcrModalBtn && ocrModalEl) {
+    openOcrModalBtn.addEventListener('click', ()=>{
+      lastTargetRow = ledgerBody.querySelector('tr.add-row') || ensureAddRow();
+      bootstrap.Modal.getOrCreateInstance(ocrModalEl).show();
+    });
+  }
+  if (ocrModalEl) {
+    ledgerBody.addEventListener('click', (e)=>{
+      if(e.target.closest('.btn-ocr')) {
+        lastTargetRow = e.target.closest('tr.add-row') || ensureAddRow();
+        bootstrap.Modal.getOrCreateInstance(ocrModalEl).show();
+      }
+    });
+  }
+
+  // 파일 선택(미리보기만 처리; 인식 파이프라인은 필요 시 채워넣을 수 있음)
+  function handleFileChosen(e){
+    const file = e.target.files?.[0];
+    if(!file) return;
+    const reader = new FileReader();
+    reader.onload = async () => {
+      const data = reader.result;
+      if (ocrImg) { ocrImg.style.display='none'; ocrImg.onload=()=>{ ocrImg.style.display='block'; }; ocrImg.src = data; }
+      // 실제 인식 루틴을 추가적으로 실행할 경우 showOcrProgress()/hideOcrProgress() 활용
+    };
+    reader.readAsDataURL(file);
+  }
+  if (btnCamera)  btnCamera.addEventListener('click', ()=> fileCamera && fileCamera.click());
+  if (btnGallery) btnGallery.addEventListener('click', ()=> fileGallery && fileGallery.click());
+  if (fileCamera) fileCamera.addEventListener('change', handleFileChosen);
+  if (fileGallery) fileGallery.addEventListener('change', handleFileChosen);
+
+  // 적용: 값 자동 채움 후 모달 닫기 → 정렬/합계 반영
+  if (btnOcrApply) {
+    btnOcrApply.addEventListener('click', async ()=>{
+      const row = lastTargetRow || ensureAddRow();
+      const date  = ocrDateInput ? (ocrDateInput.value || today()) : today();
+      const total = ocrTotalInput ? (Number(ocrTotalInput.value||0) || 0) : 0;
+      const desc  = ocrDescInput ? ((ocrDescInput.value||'').trim() || '영수증 지출') : '영수증 지출';
+
+      row.querySelector('#addDate').value   = date;
+      row.querySelector('#addExpense').value= String(total);
+      const descEl = row.querySelector('#addDesc');
+      if(descEl) descEl.value = desc;
+
+      bootstrap.Modal.getOrCreateInstance(ocrModalEl).hide();
+      sortRows(getCurrentOrder());
+      updateTotals();
+    });
+  }
+
+  // 모달 닫힐 때 초기화 + 빈 입력행 제거
+  if (ocrModalEl) {
+    ocrModalEl.addEventListener('hidden.bs.modal', ()=>{
+      resetOcrModal();
+      const addRow = ledgerBody.querySelector('tr.add-row');
+      if (addRow) { addRow.remove(); afterRowChange(); }
+    });
+  }
+
+  /* 초기 렌더 보정 */
+  renderYearLabels();
+  sortRows(getCurrentOrder());
+  recomputeRunningBalance(); updateTotals();
+});
+</script>
