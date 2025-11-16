@@ -19,16 +19,40 @@ function sanitizeXmlText(v) {
 }
 const toNum = (v, d = 0) => (Number.isFinite(Number(v)) ? Number(v) : d);
 
-// 공용 테두리 프리셋
+// 통일 테두리 프리셋
 const B_THIN   = { style: 'thin',   color: { argb: 'FFBFBFBF' } };
 const B_MEDIUM = { style: 'medium', color: { argb: 'FF808080' } };
 const B_THICK  = { style: 'thick',  color: { argb: 'FF404040' } };
+
+// 범위 전체에 동일 테두리 적용
+function setRangeBorder(ws, r1, c1, r2, c2, { top, right, bottom, left }) {
+  for (let r = r1; r <= r2; r++) {
+    for (let c = c1; c <= c2; c++) {
+      // 각 셀 기준으로 해당 변만 지정 (겹치는 곳도 일관되게 지정)
+      const cell = ws.getCell(r, c);
+      const border = {};
+      if (r === r1 && top) border.top = top;
+      if (r === r2 && bottom) border.bottom = bottom;
+      if (c === c1 && left) border.left = left;
+      if (c === c2 && right) border.right = right;
+
+      // 다른 변은 유지하려면 얇은 선으로 통일
+      if (!border.top) border.top = B_THIN;
+      if (!border.right) border.right = B_THIN;
+      if (!border.bottom) border.bottom = B_THIN;
+      if (!border.left) border.left = B_THIN;
+
+      cell.border = border;
+    }
+  }
+}
 
 export async function buildLedgerExcel({
   rows = [],
   carry,
   pageSummary = {},
 } = {}) {
+  const safeRows = Array.isArray(rows) ? rows : [];
   const wb = new ExcelJS.Workbook();
   const ws = wb.addWorksheet('공금수불부', {
     pageSetup: { paperSize: 9, orientation: 'portrait' },
@@ -36,15 +60,15 @@ export async function buildLedgerExcel({
     views: [{ state: 'frozen', ySplit: 2 }],
   });
 
-  // 열너비
+  // 열너비(엑셀 문자기반 단위)
   COL_WIDTHS.forEach((w, i) => (ws.getColumn(i + 1).width = w));
 
   // ===== 제목 =====
   const lastColLetter = String.fromCharCode(64 + COL_WIDTHS.length); // 'G'
   ws.mergeCells(`A1:${lastColLetter}1`);
   const yearByData = (() => {
-    if (rows.length && rows[0]?.date) {
-      const d = new Date(rows[0].date);
+    if (safeRows.length && safeRows[0]?.date) {
+      const d = new Date(safeRows[0].date);
       if (!isNaN(d)) return d.getFullYear();
     }
     return new Date().getFullYear();
@@ -73,27 +97,24 @@ export async function buildLedgerExcel({
     ws.getColumn(col).alignment = { horizontal: 'right', vertical: 'middle' };
   });
 
-  // ===== 데이터 작성 + 병합 구간 기록 =====
+  // ===== 데이터 작성 + 구간 계산 =====
   let running = toNum(carry?.prevCarry, 0);
-  const dataStartRow = 3; // 1:제목, 2:헤더, 3부터 데이터
+  const dataStartRow = 3; // 1:제목, 2:헤더
 
-  // YM 병합(A,B) 구간
-  const ymSegments = []; // {start,end}
+  // 병합/테두리 구간
+  const ymSegments = [];   // A,B 병합용 (년-월)
   let ymStart = null, prevYM = null;
 
-  // YMD 병합(C) 구간
-  const ymdSegments = []; // {start,end}
+  const ymdSegments = [];  // C 병합용 (년-월-일)
   let ymdStart = null, prevYMD = null;
 
-  // 월 구간 테두리용
-  const monthBands = []; // {start,end} for same Y-M
+  const monthBands = [];   // 월 테두리(thick)
   let mbStart = null, prevMonthKey = null;
 
-  // 일 구간 테두리용
-  const dayBands = []; // {start,end} for same Y-M-D
+  const dayBands = [];     // 일 테두리(medium)
   let dbStart = null, prevDayKey = null;
 
-  rows.forEach((r, idx) => {
+  safeRows.forEach((r, idx) => {
     const d = new Date(r?.date);
     const ok = Number.isFinite(d.getTime());
     const y = ok ? d.getFullYear() : null;
@@ -122,7 +143,7 @@ export async function buildLedgerExcel({
 
     const rowNo = dataStartRow + idx;
 
-    // YM 병합
+    // YM (년-월) 키
     const ymKey = y != null && m != null ? `${y}-${m}` : null;
     if (ymKey && prevYM === ymKey) {
       // 진행
@@ -135,7 +156,7 @@ export async function buildLedgerExcel({
       prevYM = ymKey;
     }
 
-    // YMD 병합
+    // YMD (년-월-일) 키
     const ymdKey = y != null && m != null && day != null ? `${y}-${m}-${day}` : null;
     if (ymdKey && prevYMD === ymdKey) {
       // 진행
@@ -148,7 +169,7 @@ export async function buildLedgerExcel({
       prevYMD = ymdKey;
     }
 
-    // 월 구간 테두리
+    // 월 테두리 밴드
     if (ymKey && prevMonthKey === ymKey) {
       // 진행
     } else {
@@ -160,7 +181,7 @@ export async function buildLedgerExcel({
       prevMonthKey = ymKey;
     }
 
-    // 일 구간 테두리
+    // 일 테두리 밴드
     if (ymdKey && prevDayKey === ymdKey) {
       // 진행
     } else {
@@ -173,99 +194,54 @@ export async function buildLedgerExcel({
     }
   });
 
-  // 구간 마감
-  const lastDataRow = ws.rowCount;
+  const lastDataRow = ws.rowCount; // 데이터의 실제 마지막 행 번호
+
+  // 구간 마감 (단일 행이면 병합/굵은선 생략)
   if (ymStart != null && prevYM != null && lastDataRow > ymStart)
     ymSegments.push({ start: ymStart, end: lastDataRow });
   if (ymdStart != null && prevYMD != null && lastDataRow > ymdStart)
     ymdSegments.push({ start: ymdStart, end: lastDataRow });
-  if (mbStart != null && prevMonthKey != null && lastDataRow >= mbStart)
+  if (mbStart != null && prevMonthKey != null && lastDataRow > mbStart - 1)
     monthBands.push({ start: mbStart, end: lastDataRow });
-  if (dbStart != null && prevDayKey != null && lastDataRow >= dbStart)
+  if (dbStart != null && prevDayKey != null && lastDataRow > dbStart - 1)
     dayBands.push({ start: dbStart, end: lastDataRow });
 
   // ===== 병합 적용 =====
-  // A,B = 년·월 단위 병합
   for (const seg of ymSegments) {
-    ['A', 'B'].forEach((col) => {
-      ws.mergeCells(`${col}${seg.start}:${col}${seg.end}`);
-      ws.getCell(`${col}${seg.start}`).alignment = { horizontal: 'center', vertical: 'middle' };
+    if (seg.end > seg.start) {
+      ['A', 'B'].forEach((col) => {
+        ws.mergeCells(`${col}${seg.start}:${col}${seg.end}`);
+        ws.getCell(`${col}${seg.start}`).alignment = { horizontal: 'center', vertical: 'middle' };
+      });
+    }
+  }
+  for (const seg of ymdSegments) {
+    if (seg.end > seg.start) {
+      ws.mergeCells(`C${seg.start}:C${seg.end}`);
+      ws.getCell(`C${seg.start}`).alignment = { horizontal: 'center', vertical: 'middle' };
+    }
+  }
+
+  // ===== 큰 틀 외곽선(A2:G<lastDataRow>) - 굵게 =====
+  if (lastDataRow >= 2) {
+    setRangeBorder(ws, 2, 1, lastDataRow, 7, {
+      top: B_THICK, right: B_THICK, bottom: B_THICK, left: B_THICK,
     });
   }
-  // C = 년·월·일 단위 병합
-  for (const seg of ymdSegments) {
-    ws.mergeCells(`C${seg.start}:C${seg.end}`);
-    ws.getCell(`C${seg.start}`).alignment = { horizontal: 'center', vertical: 'middle' };
-  }
 
-  // ===== 큰 틀 외곽 테두리(A2:G<lastDataRow>) =====
-  if (lastDataRow >= 2) {
-    // 위/아래 굵게
-    for (let c = 1; c <= 7; c++) {
-      const topCell = ws.getCell(lastDataRow >= 2 ? 2 : 2, c); // 헤더행
-      topCell.border = {
-        top: B_THICK, left: topCell.border?.left ?? B_THIN,
-        right: topCell.border?.right ?? B_THIN, bottom: topCell.border?.bottom ?? B_THIN
-      };
-      const botCell = ws.getCell(lastDataRow, c);
-      botCell.border = {
-        top: botCell.border?.top ?? B_THIN, left: botCell.border?.left ?? B_THIN,
-        right: botCell.border?.right ?? B_THIN, bottom: B_THICK
-      };
-    }
-    // 좌/우 굵게
-    for (let r = 2; r <= lastDataRow; r++) {
-      const leftCell = ws.getCell(r, 1);
-      leftCell.border = {
-        top: leftCell.border?.top ?? B_THIN, left: B_THICK,
-        right: leftCell.border?.right ?? B_THIN, bottom: leftCell.border?.bottom ?? B_THIN
-      };
-      const rightCell = ws.getCell(r, 7);
-      rightCell.border = {
-        top: rightCell.border?.top ?? B_THIN, left: rightCell.border?.left ?? B_THIN,
-        right: B_THICK, bottom: rightCell.border?.bottom ?? B_THIN
-      };
+  // ===== 월/일 구간 구분선 =====
+  for (const b of monthBands) {
+    if (b.end >= b.start) {
+      // 시작 상단 / 종료 하단 thick
+      setRangeBorder(ws, b.start, 1, b.start, 7, { top: B_THICK, right: null, bottom: null, left: null });
+      setRangeBorder(ws, b.end,   1, b.end,   7, { top: null, right: null, bottom: B_THICK, left: null });
     }
   }
-
-  // ===== 월 구간 두꺼운 가로선(thick) =====
-  for (const band of monthBands) {
-    // 시작 행 상단, 종료 행 하단
-    for (let c = 1; c <= 7; c++) {
-      const startCell = ws.getCell(band.start, c);
-      startCell.border = {
-        top: B_THICK,
-        left: startCell.border?.left ?? B_THIN,
-        right: startCell.border?.right ?? B_THIN,
-        bottom: startCell.border?.bottom ?? B_THIN,
-      };
-      const endCell = ws.getCell(band.end, c);
-      endCell.border = {
-        top: endCell.border?.top ?? B_THIN,
-        left: endCell.border?.left ?? B_THIN,
-        right: endCell.border?.right ?? B_THIN,
-        bottom: B_THICK,
-      };
-    }
-  }
-
-  // ===== 일 구간 중간 가로선(medium) =====
-  for (const band of dayBands) {
-    for (let c = 1; c <= 7; c++) {
-      const startCell = ws.getCell(band.start, c);
-      startCell.border = {
-        top: B_MEDIUM,
-        left: startCell.border?.left ?? B_THIN,
-        right: startCell.border?.right ?? B_THIN,
-        bottom: startCell.border?.bottom ?? B_THIN,
-      };
-      const endCell = ws.getCell(band.end, c);
-      endCell.border = {
-        top: endCell.border?.top ?? B_THIN,
-        left: endCell.border?.left ?? B_THIN,
-        right: endCell.border?.right ?? B_THIN,
-        bottom: B_MEDIUM,
-      };
+  for (const b of dayBands) {
+    if (b.end >= b.start) {
+      // 시작 상단 / 종료 하단 medium
+      setRangeBorder(ws, b.start, 1, b.start, 7, { top: B_MEDIUM, right: null, bottom: null, left: null });
+      setRangeBorder(ws, b.end,   1, b.end,   7, { top: null, right: null, bottom: B_MEDIUM, left: null });
     }
   }
 
@@ -315,9 +291,10 @@ export async function buildLedgerExcel({
     v.border = { top: B_THIN, left: B_THIN, right: B_THIN, bottom: B_THIN };
   }
 
-  // 제목 정렬 보강
+  // 제목 정렬 재보강
   ws.getCell('A1').alignment = { horizontal: 'center', vertical: 'middle' };
 
   const buf = await wb.xlsx.writeBuffer();
+  // writeBuffer()가 이미 Uint8Array를 반환 → Buffer로 감싸서 반환
   return Buffer.from(buf);
 }
