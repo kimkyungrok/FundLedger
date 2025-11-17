@@ -28,8 +28,9 @@ const toNum = (v, d = 0) => {
   return Number.isFinite(n) ? n : d;
 };
 
-// 열 폭 (A~G) - 템플릿 기준
-const COL_WIDTHS = [5.0, 4.0, 13.0, 20.13, 13.13, 13.0, 16.13];
+// 열 폭 (A~G) - 엑셀 시트 열 너비 기준
+// A = 4.38, B = 3.38, C = 3.38, D = 19.5, E = 12.5, F = 12.5, G = 15.5
+const COL_WIDTHS = [4.38, 3.38, 3.38, 19.5, 12.5, 12.5, 15.5];
 
 // 원화 회계 서식 ("₩", 0일 때 "-")
 const ACCOUNT_FMT =
@@ -86,12 +87,12 @@ export async function createWorkbookFromEntries(summary, rows, options = {}) {
     { header: '잔액', key: 'balance', width: COL_WIDTHS[6] },
   ];
 
-  // 2행까지 고정
+  // 2행까지 고정 (1: 제목, 2: 헤더)
   ws.views = [
     {
       state: 'frozen',
       xSplit: 0,
-      ySplit: 2,        // 위 2줄 고정 (1: 제목, 2: 헤더)
+      ySplit: 2,
       topLeftCell: 'A3',
     },
   ];
@@ -146,6 +147,9 @@ export async function createWorkbookFromEntries(summary, rows, options = {}) {
   rows = Array.isArray(rows) ? rows : [];
   let running = toNum(detail.prevCarry);
 
+  // 날짜 병합을 위한 메타 저장
+  const dateMeta = [];
+
   rows.forEach((r, idx) => {
     const rowIndex = dataStartRow + idx;
     const row = ws.getRow(rowIndex);
@@ -184,9 +188,11 @@ export async function createWorkbookFromEntries(summary, rows, options = {}) {
     row.getCell(6).value = expense || null;
     row.getCell(7).value = running || null;
 
+    // 연/월/일: 항상 가운데 정렬
     row.getCell(1).alignment = { horizontal: 'center', vertical: 'center' };
     row.getCell(2).alignment = { horizontal: 'center', vertical: 'center' };
     row.getCell(3).alignment = { horizontal: 'center', vertical: 'center' };
+
     row.getCell(4).alignment = {
       horizontal: 'left',
       vertical: 'center',
@@ -201,9 +207,47 @@ export async function createWorkbookFromEntries(summary, rows, options = {}) {
       cell.font = cell.font || { name: '맑은 고딕', size: 10 };
       applyThinBorder(cell);
     }
+
+    dateMeta.push({ rowIndex, y, m, d });
   });
 
   const lastDataRow = rows.length ? dataStartRow + rows.length - 1 : dataStartRow - 1;
+
+  /* ===== 같은 날짜(연/월/일) 병합 ===== */
+  if (dateMeta.length > 1) {
+    const sameDate = (a, b) =>
+      a.y === b.y && a.m === b.m && a.d === b.d && a.y && a.m && a.d;
+
+    let groupStart = dateMeta[0].rowIndex;
+    let prev = dateMeta[0];
+
+    const flushGroup = (startRow, endRow) => {
+      if (startRow >= endRow) return; // 한 줄이면 병합 안 함
+      try {
+        // 년(A), 월(B), 일(C) 열 각각 세로 병합
+        for (let col = 1; col <= 3; col++) {
+          ws.mergeCells(startRow, col, endRow, col);
+          const cell = ws.getCell(startRow, col);
+          cell.alignment = { horizontal: 'center', vertical: 'center' };
+          applyThinBorder(cell);
+        }
+      } catch (err) {
+        console.error('[excel.js] date merge 실패:', { startRow, endRow }, err);
+      }
+    };
+
+    for (let i = 1; i < dateMeta.length; i++) {
+      const cur = dateMeta[i];
+      if (sameDate(prev, cur)) {
+        prev = cur;
+        continue;
+      }
+      flushGroup(groupStart, prev.rowIndex);
+      groupStart = cur.rowIndex;
+      prev = cur;
+    }
+    flushGroup(groupStart, prev.rowIndex);
+  }
 
   /* ===== 내역 이후: 요약 블록 배치 ===== */
   // 내역 마지막 줄 다음에 한 줄 비우고, 그 아래부터 요약 작성
