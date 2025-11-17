@@ -1,300 +1,308 @@
 // src/utils/excel.js
 import ExcelJS from 'exceljs';
 
-const COL_WIDTHS = [5, 4, 4, 20.13, 13.13, 13.13, 16.13];
+/* ===== 공용 유틸 ===== */
 
+// Excel XML에서 허용되지 않는 문자 제거
 function sanitizeXmlText(v) {
   if (v == null) return '';
   let o = '';
   for (const ch of String(v)) {
     const cp = ch.codePointAt(0);
     if (
-      (cp >= 0x20 && cp <= 0xD7FF) ||
-      (cp >= 0xE000 && cp <= 0xFFFD) ||
-      (cp >= 0x10000 && cp <= 0x10FFFF) ||
-      cp === 0x09 || cp === 0x0A || cp === 0x0D
-    ) o += ch;
+      (cp >= 0x20 && cp <= 0xd7ff) ||
+      (cp >= 0xe000 && cp <= 0xfffd) ||
+      (cp >= 0x10000 && cp <= 0x10ffff) ||
+      cp === 0x09 ||
+      cp === 0x0a ||
+      cp === 0x0d
+    ) {
+      o += ch;
+    }
   }
   return o;
 }
-const toNum = (v, d = 0) => (Number.isFinite(Number(v)) ? Number(v) : d);
 
-// 통일 테두리 프리셋
-const B_THIN   = { style: 'thin',   color: { argb: 'FFBFBFBF' } };
-const B_MEDIUM = { style: 'medium', color: { argb: 'FF808080' } };
-const B_THICK  = { style: 'thick',  color: { argb: 'FF404040' } };
+const toNum = (v, d = 0) => {
+  const n = Number(v);
+  return Number.isFinite(n) ? n : d;
+};
 
-// 범위 전체에 동일 테두리 적용
-function setRangeBorder(ws, r1, c1, r2, c2, { top, right, bottom, left }) {
-  for (let r = r1; r <= r2; r++) {
-    for (let c = c1; c <= c2; c++) {
-      // 각 셀 기준으로 해당 변만 지정 (겹치는 곳도 일관되게 지정)
-      const cell = ws.getCell(r, c);
-      const border = {};
-      if (r === r1 && top) border.top = top;
-      if (r === r2 && bottom) border.bottom = bottom;
-      if (c === c1 && left) border.left = left;
-      if (c === c2 && right) border.right = right;
+// 열 폭 (A~G) - 템플릿 기준
+const COL_WIDTHS = [5.0, 4.0, 13.0, 20.13, 13.13, 13.0, 16.13];
 
-      // 다른 변은 유지하려면 얇은 선으로 통일
-      if (!border.top) border.top = B_THIN;
-      if (!border.right) border.right = B_THIN;
-      if (!border.bottom) border.bottom = B_THIN;
-      if (!border.left) border.left = B_THIN;
+// 원화 회계 서식 ("₩", 0일 때 "-")
+const ACCOUNT_FMT =
+  '_-[$₩-ko-KR]* #,##0_-;_-[$₩-ko-KR]* #,##0_-;_-[$₩-ko-KR]* "-"_-;_-@_-';
 
-      cell.border = border;
-    }
-  }
+function applyThinBorder(cell) {
+  cell.border = {
+    top: { style: 'thin', color: { argb: 'FF000000' } },
+    left: { style: 'thin', color: { argb: 'FF000000' } },
+    bottom: { style: 'thin', color: { argb: 'FF000000' } },
+    right: { style: 'thin', color: { argb: 'FF000000' } },
+  };
 }
 
-export async function buildLedgerExcel({
-  rows = [],
-  carry,
-  pageSummary = {},
-} = {}) {
-  const safeRows = Array.isArray(rows) ? rows : [];
+function applyMoney(cell) {
+  cell.numFmt = ACCOUNT_FMT;
+  cell.alignment = { horizontal: 'right', vertical: 'center' };
+  cell.font = cell.font || { name: '맑은 고딕', size: 10 };
+}
+
+/**
+ * summary: /entries 에서 계산한 summary 객체
+ * rows   : DB에서 가져온 entries 배열
+ * options: { start, end, q, order } (필터/정렬 정보)
+ */
+export async function createWorkbookFromEntries(summary, rows, options = {}) {
+  console.log('[excel.js] createWorkbookFromEntries 호출', {
+    rowsLen: rows?.length ?? 0,
+    summarySnapshot: {
+      income: summary?.income,
+      expense: summary?.expense,
+      balance: summary?.balance,
+      prevYear: summary?.detail?.prevYear,
+      prevCarry: summary?.detail?.prevCarry,
+      year: summary?.detail?.year,
+    },
+    options,
+  });
+
   const wb = new ExcelJS.Workbook();
-  const ws = wb.addWorksheet('공금수불부', {
-    pageSetup: { paperSize: 9, orientation: 'portrait' },
-    properties: { defaultRowHeight: 18 },
-    views: [{ state: 'frozen', ySplit: 2 }],
-  });
+  wb.creator = 'fund-ledger';
+  wb.created = new Date();
 
-  // 열너비(엑셀 문자기반 단위)
-  COL_WIDTHS.forEach((w, i) => (ws.getColumn(i + 1).width = w));
+  const ws = wb.addWorksheet('공금수불부');
 
-  // ===== 제목 =====
-  const lastColLetter = String.fromCharCode(64 + COL_WIDTHS.length); // 'G'
-  ws.mergeCells(`A1:${lastColLetter}1`);
-  const yearByData = (() => {
-    if (safeRows.length && safeRows[0]?.date) {
-      const d = new Date(safeRows[0].date);
-      if (!isNaN(d)) return d.getFullYear();
-    }
-    return new Date().getFullYear();
-  })();
-  const title = ws.getCell('A1');
-  title.value = `${yearByData}년 공금 수불부`;
-  title.font = { name: 'Malgun Gothic', size: 16, bold: true };
-  title.alignment = { horizontal: 'center', vertical: 'middle' };
-  ws.getRow(1).height = 24;
-
-  // ===== 헤더 =====
-  const header = ws.addRow(['년', '월', '일', '적요', '수입', '지출', '잔액']);
-  header.eachCell((c) => {
-    c.font = { name: 'Malgun Gothic', size: 11, bold: true };
-    c.alignment = { horizontal: 'center', vertical: 'middle' };
-    c.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFE8E8E8' } };
-    c.border = { top: B_THIN, left: B_THIN, right: B_THIN, bottom: B_THIN };
-  });
-  ws.getRow(header.number).height = 20;
-
-  // ===== 회계 포맷 =====
-  const ACCOUNTING =
-    '_-[$₩-ko-KR]* #,##0_-;_-[$₩-ko-KR]* #,##0_-;_-[$₩-ko-KR]* "-"_-;_-@_-';
-  [5, 6, 7].forEach((col) => {
-    ws.getColumn(col).numFmt = ACCOUNTING;
-    ws.getColumn(col).alignment = { horizontal: 'right', vertical: 'middle' };
-  });
-
-  // ===== 데이터 작성 + 구간 계산 =====
-  let running = toNum(carry?.prevCarry, 0);
-  const dataStartRow = 3; // 1:제목, 2:헤더
-
-  // 병합/테두리 구간
-  const ymSegments = [];   // A,B 병합용 (년-월)
-  let ymStart = null, prevYM = null;
-
-  const ymdSegments = [];  // C 병합용 (년-월-일)
-  let ymdStart = null, prevYMD = null;
-
-  const monthBands = [];   // 월 테두리(thick)
-  let mbStart = null, prevMonthKey = null;
-
-  const dayBands = [];     // 일 테두리(medium)
-  let dbStart = null, prevDayKey = null;
-
-  safeRows.forEach((r, idx) => {
-    const d = new Date(r?.date);
-    const ok = Number.isFinite(d.getTime());
-    const y = ok ? d.getFullYear() : null;
-    const m = ok ? d.getMonth() + 1 : null;
-    const day = ok ? d.getDate() : null;
-
-    const inc = toNum(r?.income, 0);
-    const exp = toNum(r?.expense, 0);
-    running += inc - exp;
-
-    const row = ws.addRow([
-      y ?? '',
-      m ?? '',
-      day ?? '',
-      sanitizeXmlText(r?.desc ?? ''),
-      inc,
-      exp,
-      running,
-    ]);
-    row.eachCell((c, i) => {
-      c.font = { name: 'Malgun Gothic', size: 10 };
-      if (i <= 4) c.alignment = { horizontal: 'center', vertical: 'middle' };
-      else c.alignment = { horizontal: 'right', vertical: 'middle' };
-      c.border = { top: B_THIN, left: B_THIN, right: B_THIN, bottom: B_THIN };
-    });
-
-    const rowNo = dataStartRow + idx;
-
-    // YM (년-월) 키
-    const ymKey = y != null && m != null ? `${y}-${m}` : null;
-    if (ymKey && prevYM === ymKey) {
-      // 진행
-    } else {
-      if (ymStart != null && prevYM != null) {
-        const end = rowNo - 1;
-        if (end > ymStart) ymSegments.push({ start: ymStart, end });
-      }
-      ymStart = ymKey ? rowNo : null;
-      prevYM = ymKey;
-    }
-
-    // YMD (년-월-일) 키
-    const ymdKey = y != null && m != null && day != null ? `${y}-${m}-${day}` : null;
-    if (ymdKey && prevYMD === ymdKey) {
-      // 진행
-    } else {
-      if (ymdStart != null && prevYMD != null) {
-        const end = rowNo - 1;
-        if (end > ymdStart) ymdSegments.push({ start: ymdStart, end });
-      }
-      ymdStart = ymdKey ? rowNo : null;
-      prevYMD = ymdKey;
-    }
-
-    // 월 테두리 밴드
-    if (ymKey && prevMonthKey === ymKey) {
-      // 진행
-    } else {
-      if (mbStart != null && prevMonthKey != null) {
-        const end = rowNo - 1;
-        if (end >= mbStart) monthBands.push({ start: mbStart, end });
-      }
-      mbStart = ymKey ? rowNo : null;
-      prevMonthKey = ymKey;
-    }
-
-    // 일 테두리 밴드
-    if (ymdKey && prevDayKey === ymdKey) {
-      // 진행
-    } else {
-      if (dbStart != null && prevDayKey != null) {
-        const end = rowNo - 1;
-        if (end >= dbStart) dayBands.push({ start: dbStart, end });
-      }
-      dbStart = ymdKey ? rowNo : null;
-      prevDayKey = ymdKey;
-    }
-  });
-
-  const lastDataRow = ws.rowCount; // 데이터의 실제 마지막 행 번호
-
-  // 구간 마감 (단일 행이면 병합/굵은선 생략)
-  if (ymStart != null && prevYM != null && lastDataRow > ymStart)
-    ymSegments.push({ start: ymStart, end: lastDataRow });
-  if (ymdStart != null && prevYMD != null && lastDataRow > ymdStart)
-    ymdSegments.push({ start: ymdStart, end: lastDataRow });
-  if (mbStart != null && prevMonthKey != null && lastDataRow > mbStart - 1)
-    monthBands.push({ start: mbStart, end: lastDataRow });
-  if (dbStart != null && prevDayKey != null && lastDataRow > dbStart - 1)
-    dayBands.push({ start: dbStart, end: lastDataRow });
-
-  // ===== 병합 적용 =====
-  for (const seg of ymSegments) {
-    if (seg.end > seg.start) {
-      ['A', 'B'].forEach((col) => {
-        ws.mergeCells(`${col}${seg.start}:${col}${seg.end}`);
-        ws.getCell(`${col}${seg.start}`).alignment = { horizontal: 'center', vertical: 'middle' };
-      });
-    }
-  }
-  for (const seg of ymdSegments) {
-    if (seg.end > seg.start) {
-      ws.mergeCells(`C${seg.start}:C${seg.end}`);
-      ws.getCell(`C${seg.start}`).alignment = { horizontal: 'center', vertical: 'middle' };
-    }
-  }
-
-  // ===== 큰 틀 외곽선(A2:G<lastDataRow>) - 굵게 =====
-  if (lastDataRow >= 2) {
-    setRangeBorder(ws, 2, 1, lastDataRow, 7, {
-      top: B_THICK, right: B_THICK, bottom: B_THICK, left: B_THICK,
-    });
-  }
-
-  // ===== 월/일 구간 구분선 =====
-  for (const b of monthBands) {
-    if (b.end >= b.start) {
-      // 시작 상단 / 종료 하단 thick
-      setRangeBorder(ws, b.start, 1, b.start, 7, { top: B_THICK, right: null, bottom: null, left: null });
-      setRangeBorder(ws, b.end,   1, b.end,   7, { top: null, right: null, bottom: B_THICK, left: null });
-    }
-  }
-  for (const b of dayBands) {
-    if (b.end >= b.start) {
-      // 시작 상단 / 종료 하단 medium
-      setRangeBorder(ws, b.start, 1, b.start, 7, { top: B_MEDIUM, right: null, bottom: null, left: null });
-      setRangeBorder(ws, b.end,   1, b.end,   7, { top: null, right: null, bottom: B_MEDIUM, left: null });
-    }
-  }
-
-  // ===== 합계 요약표 =====
-  const sumIncome = toNum(pageSummary?.sumIncome, 0);
-  const sumExpense = toNum(pageSummary?.sumExpense, 0);
-  const sumBalance = toNum(pageSummary?.sumBalance, running);
-  ws.addRow([]);
-
-  const headRow = ws.addRow([null, null, null, null, '총 수입', '총 지출', '총 잔액']);
-  ['E', 'F', 'G'].forEach((col) => {
-    const c = ws.getCell(`${col}${headRow.number}`);
-    c.font = { name: 'Malgun Gothic', size: 11, bold: true };
-    c.alignment = { horizontal: 'center', vertical: 'middle' };
-    c.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFBDD7EE' } };
-    c.border = { top: B_THIN, left: B_THIN, right: B_THIN, bottom: B_THIN };
-  });
-
-  const valRow = ws.addRow([null, null, null, null, sumIncome, sumExpense, sumBalance]);
-  ['E', 'F', 'G'].forEach((col) => {
-    const c = ws.getCell(`${col}${valRow.number}`);
-    c.font = { name: 'Malgun Gothic', size: 10, bold: true };
-    c.alignment = { horizontal: 'right', vertical: 'middle' };
-    c.numFmt = ACCOUNTING;
-    c.border = { top: B_THIN, left: B_THIN, right: B_THIN, bottom: B_THIN };
-  });
-
-  ws.addRow([]);
-  const prevYear = Number(carry?.prevYear) || yearByData - 1;
-  const kvRows = [
-    [`${prevYear}년 이월금`, toNum(carry?.prevCarry, 0)],
-    [`${yearByData}년 수입`, sumIncome],
-    [`${yearByData}년 지출`, sumExpense],
-    [`${yearByData}년 총 잔액`, sumBalance],
+  // 열 설정
+  ws.columns = [
+    { header: '년', key: 'year', width: COL_WIDTHS[0] },
+    { header: '월', key: 'month', width: COL_WIDTHS[1] },
+    { header: '일', key: 'day', width: COL_WIDTHS[2] },
+    { header: '적요', key: 'desc', width: COL_WIDTHS[3] },
+    { header: '수입', key: 'income', width: COL_WIDTHS[4] },
+    { header: '지출', key: 'expense', width: COL_WIDTHS[5] },
+    { header: '잔액', key: 'balance', width: COL_WIDTHS[6] },
   ];
-  for (const [label, value] of kvRows) {
-    const r = ws.addRow([null, null, null, null, label, null, value]);
-    ws.mergeCells(`E${r.number}:F${r.number}`);
-    const l = ws.getCell(`E${r.number}`);
-    const v = ws.getCell(`G${r.number}`);
-    l.font = { name: 'Malgun Gothic', size: 10, bold: true };
-    v.font = { name: 'Malgun Gothic', size: 10, bold: true };
-    l.alignment = { horizontal: 'center', vertical: 'middle' };
-    v.alignment = { horizontal: 'right', vertical: 'middle' };
-    v.numFmt = ACCOUNTING;
-    l.border = { top: B_THIN, left: B_THIN, right: B_THIN, bottom: B_THIN };
-    v.border = { top: B_THIN, left: B_THIN, right: B_THIN, bottom: B_THIN };
+
+  // 2행까지 고정
+  ws.views = [
+    {
+      state: 'frozen',
+      xSplit: 0,
+      ySplit: 2,        // 위 2줄 고정 (1: 제목, 2: 헤더)
+      topLeftCell: 'A3',
+    },
+  ];
+
+  const detail = Object.assign(
+    {
+      prevYear: new Date().getFullYear() - 1,
+      year: new Date().getFullYear(),
+      prevCarry: 0,
+      yearIncome: 0,
+      yearExpense: 0,
+      yearBalance: 0,
+    },
+    (summary && summary.detail) || {}
+  );
+
+  const totalIncome = toNum(summary?.income);
+  const totalExpense = toNum(summary?.expense);
+  const totalBalance = toNum(summary?.balance);
+
+  /* ===== 1행: 제목 ===== */
+  const titleRow = ws.getRow(1);
+  titleRow.getCell(1).value = `${detail.year}년 공금 수불부`;
+  titleRow.getCell(1).font = { name: '맑은 고딕', size: 14, bold: true };
+  titleRow.getCell(1).alignment = { horizontal: 'center', vertical: 'center' };
+  ws.mergeCells('A1:G1');
+
+  /* ===== 2행: 머리글 ===== */
+  const headerRow = ws.getRow(2);
+  headerRow.getCell(1).value = '년';
+  headerRow.getCell(2).value = '월';
+  headerRow.getCell(3).value = '일';
+  headerRow.getCell(4).value = '적요';
+  headerRow.getCell(5).value = '수입';
+  headerRow.getCell(6).value = '지출';
+  headerRow.getCell(7).value = '잔액';
+
+  for (let c = 1; c <= 7; c++) {
+    const cell = headerRow.getCell(c);
+    cell.font = { name: '맑은 고딕', size: 10, bold: true };
+    cell.alignment = { horizontal: 'center', vertical: 'center' };
+    cell.fill = {
+      type: 'pattern',
+      pattern: 'solid',
+      fgColor: { argb: 'FFE7E6E6' }, // 헤더 배경
+    };
+    applyThinBorder(cell);
   }
 
-  // 제목 정렬 재보강
-  ws.getCell('A1').alignment = { horizontal: 'center', vertical: 'middle' };
+  /* ===== 3행부터: 입출금 내역 ===== */
+  const dataStartRow = 3;
+  rows = Array.isArray(rows) ? rows : [];
+  let running = toNum(detail.prevCarry);
 
-  const buf = await wb.xlsx.writeBuffer();
-  // writeBuffer()가 이미 Uint8Array를 반환 → Buffer로 감싸서 반환
-  return Buffer.from(buf);
+  rows.forEach((r, idx) => {
+    const rowIndex = dataStartRow + idx;
+    const row = ws.getRow(rowIndex);
+
+    let y = '';
+    let m = '';
+    let d = '';
+    if (r.date) {
+      const raw = String(r.date);
+      const m1 = raw.match(/^(\d{4})-(\d{2})-(\d{2})/);
+      if (m1) {
+        y = m1[1];
+        m = String(Number(m1[2]));
+        d = String(Number(m1[3]));
+      } else {
+        try {
+          const dt = new Date(raw);
+          if (!Number.isNaN(dt.getTime())) {
+            y = String(dt.getFullYear());
+            m = String(dt.getMonth() + 1);
+            d = String(dt.getDate());
+          }
+        } catch (_) {}
+      }
+    }
+
+    const income = toNum(r.income);
+    const expense = toNum(r.expense);
+    running += income - expense;
+
+    row.getCell(1).value = y || null;
+    row.getCell(2).value = m || null;
+    row.getCell(3).value = d || null;
+    row.getCell(4).value = sanitizeXmlText(r.desc || '');
+    row.getCell(5).value = income || null;
+    row.getCell(6).value = expense || null;
+    row.getCell(7).value = running || null;
+
+    row.getCell(1).alignment = { horizontal: 'center', vertical: 'center' };
+    row.getCell(2).alignment = { horizontal: 'center', vertical: 'center' };
+    row.getCell(3).alignment = { horizontal: 'center', vertical: 'center' };
+    row.getCell(4).alignment = {
+      horizontal: 'left',
+      vertical: 'center',
+      wrapText: true,
+    };
+    applyMoney(row.getCell(5));
+    applyMoney(row.getCell(6));
+    applyMoney(row.getCell(7));
+
+    for (let c = 1; c <= 7; c++) {
+      const cell = row.getCell(c);
+      cell.font = cell.font || { name: '맑은 고딕', size: 10 };
+      applyThinBorder(cell);
+    }
+  });
+
+  const lastDataRow = rows.length ? dataStartRow + rows.length - 1 : dataStartRow - 1;
+
+  /* ===== 내역 이후: 요약 블록 배치 ===== */
+  // 내역 마지막 줄 다음에 한 줄 비우고, 그 아래부터 요약 작성
+  let r = lastDataRow + 2; // 한 줄 띄운 후 시작
+
+  // --- 총 수입 / 총 지출 / 총 잔액 (2줄) ---
+  const sumHeaderRowIdx = r;
+  const sumValueRowIdx = r + 1;
+
+  const sumHeaderRow = ws.getRow(sumHeaderRowIdx);
+  sumHeaderRow.getCell(5).value = '총 수입';
+  sumHeaderRow.getCell(6).value = '총 지출';
+  sumHeaderRow.getCell(7).value = '총 잔액';
+  for (let c = 5; c <= 7; c++) {
+    const cell = sumHeaderRow.getCell(c);
+    cell.font = { name: '맑은 고딕', size: 10, bold: true };
+    cell.alignment = { horizontal: 'center', vertical: 'center' };
+    cell.fill = {
+      type: 'pattern',
+      pattern: 'solid',
+      fgColor: { argb: 'FFD9E1F2' }, // 파란 헤더
+    };
+    applyThinBorder(cell);
+  }
+
+  const sumValueRow = ws.getRow(sumValueRowIdx);
+  sumValueRow.getCell(5).value = totalIncome;
+  sumValueRow.getCell(6).value = totalExpense;
+  sumValueRow.getCell(7).value = totalBalance;
+  for (let c = 5; c <= 7; c++) {
+    const cell = sumValueRow.getCell(c);
+    applyMoney(cell);
+    applyThinBorder(cell);
+  }
+
+  // 다음 블록 시작 위치 계산
+  r = sumValueRowIdx + 2; // 한 줄 비우고 다음 블록
+
+  // --- 이월/연도별 수입·지출·총 잔액 (4줄) ---
+  const rowPrev = ws.getRow(r);
+  rowPrev.getCell(5).value = `${detail.prevYear}년 이월금`;
+  ws.mergeCells(`E${r}:F${r}`);
+  rowPrev.getCell(5).font = { name: '맑은 고딕', size: 10 };
+  rowPrev.getCell(5).alignment = { horizontal: 'center', vertical: 'center' };
+  applyThinBorder(rowPrev.getCell(5));
+  applyThinBorder(rowPrev.getCell(6));
+  rowPrev.getCell(7).value = toNum(detail.prevCarry);
+  applyMoney(rowPrev.getCell(7));
+  applyThinBorder(rowPrev.getCell(7));
+
+  const rowYearIncome = ws.getRow(r + 1);
+  rowYearIncome.getCell(5).value = `${detail.year}년 수입`;
+  ws.mergeCells(`E${r + 1}:F${r + 1}`);
+  rowYearIncome.getCell(5).font = { name: '맑은 고딕', size: 10 };
+  rowYearIncome.getCell(5).alignment = {
+    horizontal: 'center',
+    vertical: 'center',
+  };
+  applyThinBorder(rowYearIncome.getCell(5));
+  applyThinBorder(rowYearIncome.getCell(6));
+  rowYearIncome.getCell(7).value = toNum(detail.yearIncome);
+  applyMoney(rowYearIncome.getCell(7));
+  applyThinBorder(rowYearIncome.getCell(7));
+
+  const rowYearExpense = ws.getRow(r + 2);
+  rowYearExpense.getCell(5).value = `${detail.year}년 지출`;
+  ws.mergeCells(`E${r + 2}:F${r + 2}`);
+  rowYearExpense.getCell(5).font = { name: '맑은 고딕', size: 10 };
+  rowYearExpense.getCell(5).alignment = {
+    horizontal: 'center',
+    vertical: 'center',
+  };
+  applyThinBorder(rowYearExpense.getCell(5));
+  applyThinBorder(rowYearExpense.getCell(6));
+  rowYearExpense.getCell(7).value = toNum(detail.yearExpense);
+  applyMoney(rowYearExpense.getCell(7));
+  applyThinBorder(rowYearExpense.getCell(7));
+
+  const rowYearBalance = ws.getRow(r + 3);
+  rowYearBalance.getCell(5).value = `${detail.year}년 총 잔액`;
+  ws.mergeCells(`E${r + 3}:F${r + 3}`);
+  rowYearBalance.getCell(5).font = { name: '맑은 고딕', size: 10 };
+  rowYearBalance.getCell(5).alignment = {
+    horizontal: 'center',
+    vertical: 'center',
+  };
+  applyThinBorder(rowYearBalance.getCell(5));
+  applyThinBorder(rowYearBalance.getCell(6));
+  rowYearBalance.getCell(7).value = toNum(detail.yearBalance);
+  applyMoney(rowYearBalance.getCell(7));
+  applyThinBorder(rowYearBalance.getCell(7));
+
+  console.log(
+    '[excel.js] 워크북 생성 완료',
+    'rows:',
+    rows.length,
+    'summaryStartRow:',
+    sumHeaderRowIdx
+  );
+
+  return wb;
 }
