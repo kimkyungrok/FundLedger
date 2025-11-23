@@ -308,7 +308,7 @@ export async function createWorkbookFromEntries(summary, rows, options = {}) {
   };
   applyThinBorder(rowYearIncome.getCell(5));
   applyThinBorder(rowYearIncome.getCell(6));
-  rowYearIncome.getCell(7).value = toNum(detail.yearIncome);
+  rowYearIncome.getCell(7).value = totalIncome;
   applyMoney(rowYearIncome.getCell(7));
   applyThinBorder(rowYearIncome.getCell(7));
 
@@ -322,7 +322,7 @@ export async function createWorkbookFromEntries(summary, rows, options = {}) {
   };
   applyThinBorder(rowYearExpense.getCell(5));
   applyThinBorder(rowYearExpense.getCell(6));
-  rowYearExpense.getCell(7).value = toNum(detail.yearExpense);
+  rowYearExpense.getCell(7).value = totalExpense;
   applyMoney(rowYearExpense.getCell(7));
   applyThinBorder(rowYearExpense.getCell(7));
 
@@ -336,7 +336,7 @@ export async function createWorkbookFromEntries(summary, rows, options = {}) {
   };
   applyThinBorder(rowYearBalance.getCell(5));
   applyThinBorder(rowYearBalance.getCell(6));
-  rowYearBalance.getCell(7).value = toNum(detail.yearBalance);
+  rowYearBalance.getCell(7).value = totalBalance;
   applyMoney(rowYearBalance.getCell(7));
   applyThinBorder(rowYearBalance.getCell(7));
 
